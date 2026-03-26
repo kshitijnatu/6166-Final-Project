@@ -32,3 +32,6 @@ After cloning the repository:
    ```
 
 3. Open the printed local URL in your browser (by default it is usually `http://localhost:5173/`).
+
+## Model Weights
+https://drive.google.com/file/d/1dBiVs7q9fJRd7FIWCh7vs4x_5cEvASpB/view?usp=drive_link
