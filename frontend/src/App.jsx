@@ -1,3 +1,4 @@
+import React from 'react'
 import VideoAnalyzer from "./components/VideoAnalyzer";
 import "./App.css";
 

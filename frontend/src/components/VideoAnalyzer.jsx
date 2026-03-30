@@ -1,3 +1,4 @@
+import React from 'react'
 import { useState, useRef } from "react";
 
 function VideoAnalyzer() {
@@ -27,26 +28,22 @@ function VideoAnalyzer() {
       const formData = new FormData();
       formData.append("video", videoFile);
     
-      /* TODO [MT] uncomment when MS-TCT service ready
+      // Calling the LOCAL Python backend
       const response = await fetch("http://localhost:5000/analyze", {
         method: "POST",
         body: formData,
       });
 
+      if (!response.ok) {
+        throw new Error("Network response was not ok");
+      }
+
       const data = await response.json();
-      */
-
-        const mockResponse = [
-            { time: "00:01.2", label: "Walking" },
-            { time: "00:03.4", label: "Sitting" },
-            { time: "00:07.8", label: "Standing" },
-            { time: "00:12.5", label: "Running" }
-        ];
-
-        setActions(mockResponse);
-    } 
-    catch (error) {
+      setActions(data);
+      
+    } catch (error) {
       console.error("Error analyzing video:", error);
+      alert("Failed to connect to the backend server. Is server.py running?");
     } finally {
       setLoading(false);
     }
@@ -81,7 +78,7 @@ function VideoAnalyzer() {
         </button>
       </div>
 
-      {loading && <p className="processing-text">Processing...</p>}
+      {loading && <p className="processing-text">Processing on local backend...</p>}
 
       {videoURL && (
         <div className="video-container">
