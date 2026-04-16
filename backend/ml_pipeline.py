@@ -4,11 +4,13 @@ import numpy as np
 import sys
 import os
 import pickle
+import tempfile
 
 # --- PATH SETUP ---
 # Ensure Python can find both cloned repositories
 sys.path.append(os.path.join(os.path.dirname(__file__), 'pytorch-i3d'))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'MS-TCT'))
+print("Starting new code.")
 
 try:
     from pytorch_i3d import InceptionI3d
@@ -73,7 +75,7 @@ def extract_features(video_path, target_size=224):
     return features
 
 
-def run_ms_tct(features, weights_filename="charades_model.pth"):
+def run_ms_tct(features, weights_filename="charades_model.pth", offset_seconds=0.0, clip_duration_seconds=None):
     """Runs the MS-TCT action segmentation model on the extracted features."""
     print(f"I3D Features extracted: {features.shape}") 
     
@@ -156,19 +158,25 @@ def run_ms_tct(features, weights_filename="charades_model.pth"):
 
     results = []
     
+    number_of_predictions = len(predicted_classes)
+    if number_of_predictions == 0:
+        return []
+
+    if clip_duration_seconds is None or clip_duration_seconds <= 0:
+        seconds_per_prediction = 0.5
+    else:
+        seconds_per_prediction = clip_duration_seconds / number_of_predictions
+
     # 6. Format the output for the React frontend
     for i, class_idx in enumerate(predicted_classes):
-        # Temporal downsampling estimate: ~0.5s per chunk for standard video
-        seconds = i * 0.5 
+        seconds = offset_seconds + (i * seconds_per_prediction)
         class_id = class_idx.item()
         
         # Get text label, fallback to generic ID if not in the dictionary
         action_name = charades_classes.get(class_id, f"Charades Action c{class_id:03d}")
         
         # Format time to mm:ss.s
-        mins = int(seconds // 60)
-        secs = seconds % 60
-        time_str = f"{mins:02d}:{secs:04.1f}"
+        time_str = format_timestamp(seconds)
 
         results.append({
             "time": time_str, 
@@ -178,12 +186,134 @@ def run_ms_tct(features, weights_filename="charades_model.pth"):
     return results
 
 
-def process_video_pipeline(video_path):
+def process_video_pipeline(video_path, offset_seconds=0.0, clip_duration_seconds=None):
     """Main orchestration function called by server.py."""
     print("1. Extracting I3D features...")
     features = extract_features(video_path)
     
     print("2. Running MS-TCT inference...")
-    results = run_ms_tct(features)
+    results = run_ms_tct(
+        features,
+        offset_seconds=offset_seconds,
+        clip_duration_seconds=clip_duration_seconds,
+    )
     
     return results
+
+
+def format_timestamp(total_seconds):
+    """Format elapsed seconds into mm:ss.s for frontend display."""
+    mins = int(total_seconds // 60)
+    secs = total_seconds % 60
+    return f"{mins:02d}:{secs:04.1f}"
+
+
+def stream_capture_intervals(stream_url, interval_seconds=15, target_size=224, stop_event=None):
+    """Capture a live stream in fixed intervals and run the existing pipeline per chunk."""
+    cap = cv2.VideoCapture(stream_url)
+    if not cap.isOpened():
+        raise ValueError("Could not open the provided video stream.")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 30.0
+
+    frames_per_interval = max(int(fps * interval_seconds), 1)
+    stream_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or target_size
+    stream_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or target_size
+    interval_index = 0
+    frames = []
+
+    try:
+        while True:
+            if stop_event and stop_event.is_set():
+                print("Stopping stream capture because the client disconnected.")
+                break
+
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frames.append(frame)
+
+            if len(frames) < frames_per_interval:
+                continue
+
+            if stop_event and stop_event.is_set():
+                print("Skipping interval processing because the client disconnected.")
+                break
+
+            interval_index += 1
+            yield _process_stream_interval(
+                frames=frames,
+                fps=fps,
+                width=stream_width,
+                height=stream_height,
+                interval_index=interval_index,
+                interval_seconds=interval_seconds,
+            )
+            frames = []
+
+        if frames and not (stop_event and stop_event.is_set()):
+            interval_index += 1
+            yield _process_stream_interval(
+                frames=frames,
+                fps=fps,
+                width=stream_width,
+                height=stream_height,
+                interval_index=interval_index,
+                interval_seconds=interval_seconds,
+                is_partial=True,
+            )
+    finally:
+        cap.release()
+
+
+def _process_stream_interval(frames, fps, width, height, interval_index, interval_seconds, is_partial=False):
+    """Write one captured interval to disk temporarily and reuse the video pipeline."""
+    temp_video_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
+            temp_video_path = temp_video.name
+
+        writer = cv2.VideoWriter(
+            temp_video_path,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+
+        if not writer.isOpened():
+            raise ValueError("Could not create a temporary video file for stream processing.")
+
+        try:
+            for frame in frames:
+                if frame.shape[1] != width or frame.shape[0] != height:
+                    frame = cv2.resize(frame, (width, height))
+                writer.write(frame)
+        finally:
+            writer.release()
+
+        clip_duration_seconds = len(frames) / fps if fps > 0 else interval_seconds
+        interval_start_seconds = (interval_index - 1) * interval_seconds
+        actions = process_video_pipeline(
+            temp_video_path,
+            offset_seconds=interval_start_seconds,
+            clip_duration_seconds=clip_duration_seconds,
+        )
+        interval_label = "partial interval" if is_partial else "interval"
+
+        return {
+            "message": f"Processed {interval_label} {interval_index} (~{interval_seconds} seconds).",
+            "actions": actions,
+        }
+    except Exception as e:
+        return {
+            "message": f"Failed to process stream interval {interval_index}.",
+            "error": str(e),
+            "actions": [],
+        }
+    finally:
+        if temp_video_path and os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
