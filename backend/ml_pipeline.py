@@ -10,7 +10,6 @@ import tempfile
 # Ensure Python can find both cloned repositories
 sys.path.append(os.path.join(os.path.dirname(__file__), 'pytorch-i3d'))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'MS-TCT'))
-print("Starting new code.")
 
 try:
     from pytorch_i3d import InceptionI3d
@@ -75,8 +74,8 @@ def extract_features(video_path, target_size=224):
     return features
 
 
-def run_ms_tct(features, weights_filename="charades_model.pth", offset_seconds=0.0, clip_duration_seconds=None):
-    """Runs the MS-TCT action segmentation model on the extracted features."""
+def run_ms_tct(features, weights_filename="charades_model.pth", top_k=5):
+    """Runs MS-TCT and returns the most probable action classes for a clip."""
     print(f"I3D Features extracted: {features.shape}") 
     
     # 1. Reshape for MS-TCT ([Time, 1024] -> [Batch, Time, Channels])
@@ -116,19 +115,12 @@ def run_ms_tct(features, weights_filename="charades_model.pth", offset_seconds=0
         
         # 4. Run Inference
         with torch.no_grad():
-            # Model returns predictions (x) and a heatmap (x_hm). We ignore the heatmap.
+            # Model returns logits (x) and a heatmap (x_hm). We ignore the heatmap.
             predictions, _ = model(ms_tct_input) 
-            
-            # Get the highest scoring class for each time step across the classes dimension
-            predicted_classes = torch.argmax(predictions, dim=-1).squeeze()
-            
-            # Handle edge case for very short videos
-            if predicted_classes.dim() == 0:
-                predicted_classes = predicted_classes.unsqueeze(0)
-                
+
     except Exception as e:
         print(f"Error running MS-TCT: {e}")
-        return [{"time": "Error", "label": f"MS-TCT failed to run: {e}"}]
+        return [{"label": f"MS-TCT failed to run: {e}", "confidence": None}]
 
     # 5. Automatically load all 157 Charades class text labels
     charades_classes = {}
@@ -156,56 +148,57 @@ def run_ms_tct(features, weights_filename="charades_model.pth", offset_seconds=0
     except Exception as e:
         print(f"Warning: Could not read classes file: {e}")
 
-    results = []
-    
-    number_of_predictions = len(predicted_classes)
-    if number_of_predictions == 0:
+    probabilities = torch.softmax(predictions.squeeze(0), dim=-1)
+    if probabilities.dim() == 1:
+        probabilities = probabilities.unsqueeze(0)
+
+    if probabilities.shape[0] == 0:
         return []
 
-    if clip_duration_seconds is None or clip_duration_seconds <= 0:
-        seconds_per_prediction = 0.5
-    else:
-        seconds_per_prediction = clip_duration_seconds / number_of_predictions
+    averaged_probabilities = probabilities.mean(dim=0)
+    prediction_count = min(top_k, averaged_probabilities.shape[0])
+    top_probabilities, top_indices = torch.topk(averaged_probabilities, k=prediction_count)
 
-    # 6. Format the output for the React frontend
-    for i, class_idx in enumerate(predicted_classes):
-        seconds = offset_seconds + (i * seconds_per_prediction)
+    results = []
+    for probability, class_idx in zip(top_probabilities, top_indices):
         class_id = class_idx.item()
-        
-        # Get text label, fallback to generic ID if not in the dictionary
         action_name = charades_classes.get(class_id, f"Charades Action c{class_id:03d}")
-        
-        # Format time to mm:ss.s
-        time_str = format_timestamp(seconds)
-
         results.append({
-            "time": time_str, 
-            "label": action_name
+            "label": action_name,
+            "confidence": round(float(probability.item()) * 100, 2),
         })
-        
+
     return results
 
 
-def process_video_pipeline(video_path, offset_seconds=0.0, clip_duration_seconds=None):
+def process_video_pipeline(video_path, top_k=5, stop_event=None):
     """Main orchestration function called by server.py."""
+    if stop_event and stop_event.is_set():
+        print("Skipping pipeline because the stream was stopped before feature extraction.")
+        return []
+
     print("1. Extracting I3D features...")
     features = extract_features(video_path)
+
+    if stop_event and stop_event.is_set():
+        print("Skipping MS-TCT inference because the stream was stopped after feature extraction.")
+        return []
     
     print("2. Running MS-TCT inference...")
-    results = run_ms_tct(
-        features,
-        offset_seconds=offset_seconds,
-        clip_duration_seconds=clip_duration_seconds,
-    )
+    results = run_ms_tct(features, top_k=top_k)
     
     return results
 
 
-def format_timestamp(total_seconds):
-    """Format elapsed seconds into mm:ss.s for frontend display."""
-    mins = int(total_seconds // 60)
-    secs = total_seconds % 60
-    return f"{mins:02d}:{secs:04.1f}"
+def format_segment_label(start_seconds, end_seconds):
+    """Build human-readable labels for streamed clip intervals."""
+    rounded_start = int(round(start_seconds))
+    rounded_end = max(int(round(end_seconds)), rounded_start)
+
+    if rounded_start <= 0:
+        return f"First {rounded_end} seconds"
+
+    return f"Next {max(rounded_end - rounded_start, 1)} seconds ({rounded_start}s-{rounded_end}s)"
 
 
 def stream_capture_intervals(stream_url, interval_seconds=15, target_size=224, stop_event=None):
@@ -251,6 +244,7 @@ def stream_capture_intervals(stream_url, interval_seconds=15, target_size=224, s
                 height=stream_height,
                 interval_index=interval_index,
                 interval_seconds=interval_seconds,
+                stop_event=stop_event,
             )
             frames = []
 
@@ -264,16 +258,32 @@ def stream_capture_intervals(stream_url, interval_seconds=15, target_size=224, s
                 interval_index=interval_index,
                 interval_seconds=interval_seconds,
                 is_partial=True,
+                stop_event=stop_event,
             )
     finally:
         cap.release()
 
 
-def _process_stream_interval(frames, fps, width, height, interval_index, interval_seconds, is_partial=False):
+def _process_stream_interval(
+    frames,
+    fps,
+    width,
+    height,
+    interval_index,
+    interval_seconds,
+    is_partial=False,
+    stop_event=None,
+):
     """Write one captured interval to disk temporarily and reuse the video pipeline."""
     temp_video_path = None
 
     try:
+        if stop_event and stop_event.is_set():
+            return {
+                "message": f"Stopped before processing interval {interval_index}.",
+                "actions": [],
+            }
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
             temp_video_path = temp_video.name
 
@@ -297,16 +307,19 @@ def _process_stream_interval(frames, fps, width, height, interval_index, interva
 
         clip_duration_seconds = len(frames) / fps if fps > 0 else interval_seconds
         interval_start_seconds = (interval_index - 1) * interval_seconds
-        actions = process_video_pipeline(
-            temp_video_path,
-            offset_seconds=interval_start_seconds,
-            clip_duration_seconds=clip_duration_seconds,
-        )
+        interval_end_seconds = interval_start_seconds + clip_duration_seconds
+        actions = process_video_pipeline(temp_video_path, stop_event=stop_event)
         interval_label = "partial interval" if is_partial else "interval"
+        segment_label = format_segment_label(interval_start_seconds, interval_end_seconds)
+
+        for action in actions:
+            action["segmentLabel"] = segment_label
+            action["intervalIndex"] = interval_index
 
         return {
             "message": f"Processed {interval_label} {interval_index} (~{interval_seconds} seconds).",
             "actions": actions,
+            "segmentLabel": segment_label,
         }
     except Exception as e:
         return {

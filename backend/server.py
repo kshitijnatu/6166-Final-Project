@@ -1,8 +1,9 @@
 import os
 import tempfile
 import json
-from threading import Event
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
+import asyncio
+from threading import Event, Thread
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import cv2
@@ -11,6 +12,8 @@ import cv2
 from ml_pipeline import process_video_pipeline, stream_capture_intervals
 
 app = FastAPI()
+active_streams = {}
+STREAM_COMPLETE = {"type": "stream_complete"}
 
 # Allow the local React app to talk to this API
 app.add_middleware(
@@ -52,21 +55,60 @@ async def analyze_video(video: UploadFile = File(...)):
             print("Cleaned up temporary file.")
 
 
+@app.post("/stop-stream")
+async def stop_stream(stream_id: str = Body(..., embed=True)):
+    stop_event = active_streams.get(stream_id)
+
+    if stop_event:
+        stop_event.set()
+        print(f"Stop requested for stream session {stream_id}.")
+        return {"status": "stopping"}
+
+    return {"status": "not_found"}
+
+
+def _stream_worker(stream_url, stop_event, output_queue, loop):
+    try:
+        for interval_result in stream_capture_intervals(
+            stream_url,
+            interval_seconds=15,
+            stop_event=stop_event,
+        ):
+            if stop_event.is_set():
+                break
+            loop.call_soon_threadsafe(output_queue.put_nowait, interval_result)
+    except Exception as e:
+        loop.call_soon_threadsafe(output_queue.put_nowait, {"error": str(e), "actions": []})
+    finally:
+        loop.call_soon_threadsafe(output_queue.put_nowait, STREAM_COMPLETE)
+
+
 @app.websocket("/ws/analyze-stream")
 async def analyze_stream(websocket: WebSocket):
     await websocket.accept()
     print("WebSocket client connected for stream analysis.")
-    stop_event = Event()
+    stop_event = None
+    stream_id = None
+    worker_thread = None
 
     try:
         initial_message = await websocket.receive_text()
         payload = json.loads(initial_message)
         stream_url = payload.get("stream_url", "").strip()
+        stream_id = payload.get("stream_id", "").strip()
 
         if not stream_url:
             await websocket.send_json({"error": "A stream_url value is required."})
             await websocket.close(code=1003)
             return
+
+        if not stream_id:
+            await websocket.send_json({"error": "A stream_id value is required."})
+            await websocket.close(code=1003)
+            return
+
+        stop_event = Event()
+        active_streams[stream_id] = stop_event
 
         cap = cv2.VideoCapture(stream_url)
         if not cap.isOpened():
@@ -86,11 +128,25 @@ async def analyze_stream(websocket: WebSocket):
             "actions": [],
         })
 
-        for interval_result in stream_capture_intervals(
-            stream_url,
-            interval_seconds=15,
-            stop_event=stop_event,
-        ):
+        loop = asyncio.get_running_loop()
+        output_queue = asyncio.Queue()
+        worker_thread = Thread(
+            target=_stream_worker,
+            args=(stream_url, stop_event, output_queue, loop),
+            daemon=True,
+        )
+        worker_thread.start()
+
+        while True:
+            interval_result = await output_queue.get()
+
+            if interval_result is STREAM_COMPLETE:
+                break
+
+            if stop_event.is_set():
+                print(f"Stream session {stream_id} stopped before sending interval results.")
+                break
+
             await websocket.send_json(interval_result)
 
         if not stop_event.is_set():
@@ -117,7 +173,12 @@ async def analyze_stream(websocket: WebSocket):
         except RuntimeError:
             pass
     finally:
-        stop_event.set()
+        if stop_event:
+            stop_event.set()
+        if worker_thread and worker_thread.is_alive():
+            worker_thread.join(timeout=1.0)
+        if stream_id:
+            active_streams.pop(stream_id, None)
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=5000, reload=True)

@@ -1,19 +1,29 @@
 import React from 'react'
 import { useEffect, useRef, useState } from "react";
 
+function createStreamId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+
+  return `stream-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function VideoAnalyzer() {
   const [videoFile, setVideoFile] = useState(null);
   const [videoURL, setVideoURL] = useState(null);
   const [streamUrl, setStreamUrl] = useState("");
-  const [actions, setActions] = useState([]);
+  const [predictions, setPredictions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [streamActive, setStreamActive] = useState(false);
   const [streamStatus, setStreamStatus] = useState("");
 
   const fileInputRef = useRef(null);
   const streamSocketRef = useRef(null);
+  const streamIdRef = useRef(null);
   const analyzeEndpoint = "http://localhost:5000/analyze";
   const streamSocketEndpoint = "ws://localhost:5000/ws/analyze-stream";
+  const stopStreamEndpoint = "http://localhost:5000/stop-stream";
   
   const handleFileChange = (e) => {
     const file = e.target.files[0];
@@ -21,12 +31,12 @@ function VideoAnalyzer() {
 
     setVideoFile(file);
     setVideoURL(URL.createObjectURL(file));
-    setActions([]);
+    setPredictions([]);
   };
 
   const submitAnalysisRequest = async (requestOptions) => {
     setLoading(true);
-    setActions([]);
+    setPredictions([]);
 
     try {
       const response = await fetch(analyzeEndpoint, {
@@ -39,7 +49,7 @@ function VideoAnalyzer() {
       }
 
       const data = await response.json();
-      setActions(data);
+      setPredictions(Array.isArray(data) ? data : []);
       
     } catch (error) {
       console.error("Error analyzing video:", error);
@@ -49,13 +59,30 @@ function VideoAnalyzer() {
     }
   };
 
-  const stopStreamAnalysis = (statusMessage = "Stream analysis stopped.") => {
+  const stopStreamAnalysis = async (statusMessage = "Stream analysis stopped.") => {
     const socket = streamSocketRef.current;
+    const streamId = streamIdRef.current;
+
+    if (streamId) {
+      try {
+        await fetch(stopStreamEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ stream_id: streamId }),
+        });
+      } catch (error) {
+        console.error("Error sending stop request:", error);
+      }
+    }
 
     if (socket) {
       socket.close();
       streamSocketRef.current = null;
     }
+
+    streamIdRef.current = null;
 
     setStreamActive(false);
     setLoading(false);
@@ -83,17 +110,19 @@ function VideoAnalyzer() {
     const trimmedStreamUrl = streamUrl.trim();
     if (!trimmedStreamUrl || streamActive) return;
 
-    setActions([]);
+    setPredictions([]);
     setLoading(true);
     setStreamStatus("Connecting to live stream analysis...");
 
     const socket = new WebSocket(streamSocketEndpoint);
+    const streamId = createStreamId();
     streamSocketRef.current = socket;
+    streamIdRef.current = streamId;
 
     socket.onopen = () => {
       setStreamActive(true);
       setStreamStatus("Stream connected. Waiting for updates every 15 seconds...");
-      socket.send(JSON.stringify({ stream_url: trimmedStreamUrl }));
+      socket.send(JSON.stringify({ stream_url: trimmedStreamUrl, stream_id: streamId }));
     };
 
     socket.onmessage = (event) => {
@@ -108,7 +137,7 @@ function VideoAnalyzer() {
               : [];
 
         if (nextActions.length > 0) {
-          setActions((currentActions) => [...currentActions, ...nextActions]);
+          setPredictions((currentActions) => [...currentActions, ...nextActions]);
         }
 
         if (payload.message) {
@@ -132,6 +161,7 @@ function VideoAnalyzer() {
 
     socket.onclose = () => {
       streamSocketRef.current = null;
+      streamIdRef.current = null;
       setStreamActive(false);
       setLoading(false);
       setStreamStatus((currentStatus) =>
@@ -141,6 +171,22 @@ function VideoAnalyzer() {
       );
     };
   };
+
+  const groupedStreamPredictions = predictions.reduce((groups, prediction) => {
+    const groupKey = prediction.segmentLabel || "Uploaded Video";
+
+    if (!groups[groupKey]) {
+      groups[groupKey] = [];
+    }
+
+    groups[groupKey].push(prediction);
+    return groups;
+  }, {});
+
+  const uploadPredictions = predictions.filter((prediction) => !prediction.segmentLabel);
+  const streamSegmentEntries = Object.entries(groupedStreamPredictions).filter(
+    ([segmentLabel]) => segmentLabel !== "Uploaded Video"
+  );
 
   return (
     <div className="analyzer-container">
@@ -207,17 +253,43 @@ function VideoAnalyzer() {
         </div>
       )}
 
-      {actions.length > 0 && (
+      {uploadPredictions.length > 0 && (
         <div className="results">
-          <h2>Detected Actions:</h2>
+          <h2>Most Probable Predictions:</h2>
           <div className="actions-list">
-            {actions.map((action, index) => (
-              <div key={index} className="action-item">
-                <span className="timestamp">{action.time}</span>
-                <span className="label">{action.label}</span>
+            {uploadPredictions.map((prediction, index) => (
+              <div key={`${prediction.label}-${index}`} className="action-item">
+                <span className="label">{prediction.label}</span>
+                <span className="confidence">
+                  {prediction.confidence == null ? "N/A" : `${prediction.confidence}%`}
+                </span>
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {streamSegmentEntries.length > 0 && (
+        <div className="results">
+          <h2>Stream Predictions By Interval:</h2>
+          {streamSegmentEntries.map(([segmentLabel, segmentPredictions]) => (
+            <div key={segmentLabel} className="stream-segment">
+              <h3>{segmentLabel}</h3>
+              <div className="actions-list">
+                {segmentPredictions.map((prediction, index) => (
+                  <div
+                    key={`${segmentLabel}-${prediction.label}-${index}`}
+                    className="action-item"
+                  >
+                    <span className="label">{prediction.label}</span>
+                    <span className="confidence">
+                      {prediction.confidence == null ? "N/A" : `${prediction.confidence}%`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
