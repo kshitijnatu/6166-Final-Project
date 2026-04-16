@@ -69,6 +69,31 @@ h1 {
   justify-content: center;
   gap: 20px;
   margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.stream-controls {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.stream-input {
+  width: min(100%, 520px);
+  padding: 10px 14px;
+  border: 1px solid #cfd6de;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  color: #333;
+  background-color: #fff;
+}
+
+.stream-input:focus {
+  outline: none;
+  border-color: #1e6cf0;
+  box-shadow: 0 0 0 3px rgba(30, 108, 240, 0.12);
 }
 
 .primary-btn {
@@ -145,4 +170,18 @@ video {
 
 .label {
   color: #555;
+}
+
+@media (max-width: 768px) {
+  .app-container {
+    padding: 20px;
+  }
+
+  .analyzer-container {
+    width: 100%;
+  }
+
+  .stream-input {
+    width: 100%;
+  }
 }
