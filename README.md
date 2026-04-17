@@ -47,6 +47,7 @@ python
 
 ### Create an output folder
 mkdir "C:\path\to\folder\hls-stream"
+
 In all commands below: 
 
 Replace C:\path\to\file.mp4 with path to the file you want to loop.
