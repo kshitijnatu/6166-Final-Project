@@ -41,7 +41,8 @@ https://drive.google.com/file/d/1dBiVs7q9fJRd7FIWCh7vs4x_5cEvASpB/view?usp=drive
 To simulate a live stream locally, convert a video file into an HLS stream with ffmpeg and serve it over HTTP.
 
 ## Requirements
-ffmpeg
+ffmpeg 
+   -powershell download: (winget install --id Gyan.FFmpeg -e)
 python
 
 ### Create an output folder
