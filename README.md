@@ -42,15 +42,22 @@ To simulate a live stream locally, convert a video file into an HLS stream with 
 ### Requirements
 ffmpeg
 python
-1. Create an output folder
-mkdir "C:\path\to\folder\hls-stream"
-2. Start the looping HLS stream
-Leave this running in a terminal:
 
+####1. Create an output folder
+mkdir "C:\path\to\folder\hls-stream"
+In all commands below: 
+Replace C:\path\to\file.mp4 with path to the file you want to loop.
+Replace C:\path\to\folder\hls-stream\live.m3u8 with the path to the folder you create with livie.m3u8 ath the end
+
+####2. Start the looping HLS stream
+
+Leave this running in a powershell terminal:
 ffmpeg -re -stream_loop -1 -i "C:\path\to\file.mp4" -c:v libx264 -preset veryfast -tune zerolatency -c:a aac -f hls -hls_time 15 -hls_list_size 4 -hls_flags delete_segments+append_list "C:\path\to\folder\hls-stream\live.m3u8"
-3. Serve the stream folder
-Run this in a second terminal:
+
+####3. Serve the stream folder
+Run this in a second powershell terminal:
 
 python -m http.server 8000 --directory "C:\path\to\folder\hls-stream"
-4. Use this URL in the app
+
+####4. Use this URL in the app
 http://127.0.0.1:8000/live.m3u8
