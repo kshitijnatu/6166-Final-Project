@@ -57,6 +57,7 @@ Replace C:\path\to\folder\hls-stream\live.m3u8 with the path to the folder you c
 ### Start the looping HLS stream
 
 Leave this running in a powershell terminal:
+
 ffmpeg -re -stream_loop -1 -i "C:\path\to\file.mp4" -c:v libx264 -preset veryfast -tune zerolatency -c:a aac -f hls -hls_time 15 -hls_list_size 4 -hls_flags delete_segments+append_list "C:\path\to\folder\hls-stream\live.m3u8"
 
 ### Serve the stream folder
