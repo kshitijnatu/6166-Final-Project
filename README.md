@@ -69,5 +69,9 @@ python -m http.server 8000 --directory "C:\path\to\folder\hls-stream"
 http://127.0.0.1:8000/live.m3u8
 
 
-## Backend Live Url
+
+### Backend Live Url
 https://l8adlqgnokhlv4-5000.proxy.runpod.net/docs
+
+### Frontend Live Url
+https://mstct-project.vercel.app/
